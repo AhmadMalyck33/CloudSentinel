@@ -45,7 +45,7 @@ jobs:
           docker build -t cloudsentinel-api:latest .
           
       - name: Scan Docker Image with Trivy
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: cloudsentinel-api:latest
           format: table
