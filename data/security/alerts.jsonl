@@ -1,0 +1,1 @@
+{"alert_type": "brute_force_attempt", "severity": "high", "source_ip": "192.168.1.20", "failed_attempts": 3, "time_window_minutes": 5.0, "description": "Possible brute-force activity detected from 192.168.1.20", "generated_at": "2026-11-02T16:59:59.178334+00:00"}

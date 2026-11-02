@@ -1,13 +1,53 @@
 
 services:
+  
   cloudsentinel-api:
     build:
       context: .
       dockerfile: Dockerfile
-
     container_name: cloudsentinel-container
-
     ports:
       - "5000:5000"
-
+    volumes:
+      - ./data/security:/app/data/security
     restart: unless-stopped
+
+
+  docker-exporter:
+    build:
+      context: ./monitoring/docker-exporter
+      dockerfile: Dockerfile
+    container_name: cloudsentinel-docker-exporter
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - "9323"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: cloudsentinel-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: cloudsentinel-grafana
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:
