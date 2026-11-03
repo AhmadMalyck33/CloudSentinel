@@ -1,0 +1,137 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CloudSentinel | Security Dashboard</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+    <div class="dashboard-container">
+
+        <aside class="sidebar">
+            <div class="logo">
+                <h2>Cloud<span>Sentinel</span></h2>
+                <p>Digital Operations Platform</p>
+            </div>
+
+            <nav>
+                <a href="/dashboard" class="nav-item active">Dashboard</a>
+                <a href="#security-alerts" class="nav-item">Security Alerts</a>
+                <a href="http://localhost:9090" class="nav-item"
+                   target="_blank">Prometheus</a>
+                <a href="http://localhost:3001" class="nav-item"
+                   target="_blank">Grafana</a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <p>CloudSentinel v1.0.0</p>
+                <span>Monitoring & Security</span>
+            </div>
+        </aside>
+
+        <main class="main-content">
+
+            <header class="topbar">
+                <div>
+                    <h1>Security Dashboard</h1>
+                    <p>Infrastructure and security overview</p>
+                </div>
+
+                <div class="system-status">
+                    <span class="status-dot"></span>
+                    Systems Operational
+                </div>
+            </header>
+
+            <section class="welcome-section">
+                <h2>Welcome to CloudSentinel</h2>
+                <p>
+                    Monitor infrastructure, detect suspicious activity,
+                    and manage security events from one platform.
+                </p>
+            </section>
+
+            <!-- Dashboard statistics -->
+            <section class="stats-grid">
+
+                <div class="stat-card">
+                    <p>Total Security Alerts</p>
+                    <h2 id="total-alerts">--</h2>
+                    <span>Detected events</span>
+                </div>
+
+                <div class="stat-card">
+                    <p>High Severity Alerts</p>
+                    <h2 id="high-alerts">--</h2>
+                    <span>Require attention</span>
+                </div>
+
+                <div class="stat-card">
+                    <p>API Status</p>
+                    <h2 id="api-status">Checking</h2>
+                    <span>CloudSentinel backend</span>
+                </div>
+
+                <div class="stat-card">
+                    <p>Security Engine</p>
+                    <h2 id="security-status">Active</h2>
+                    <span>Detection module</span>
+                </div>
+
+            </section>
+
+            <!-- Security alert management -->
+            <section class="content-section" id="security-alerts">
+
+                <div class="section-heading">
+                    <div>
+                        <h2>Security Alert Management</h2>
+                        <p>Review, acknowledge and resolve security alerts.</p>
+                    </div>
+
+                    <button onclick="loadAlerts()">Refresh Alerts</button>
+                </div>
+
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Alert Type</th>
+                                <th>Source IP</th>
+                                <th>Severity</th>
+                                <th>Status</th>
+                                <th>Generated At</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+
+                        <tbody id="alerts-table">
+                            <tr>
+                                <td colspan="6">Loading alerts...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <p id="alert-message" role="status" aria-live="polite"></p>
+
+            </section>
+
+            <footer>
+                CloudSentinel | One Platform. Four Domains.
+            </footer>
+
+        </main>
+
+    </div>
+
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+
+</body>
+</html>

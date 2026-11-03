@@ -25,3 +25,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Additional local environments
+.venv-security/
+
+# Backup files
+*.backup
+*.bak
