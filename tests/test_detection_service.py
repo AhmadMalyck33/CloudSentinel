@@ -57,3 +57,21 @@ def test_second_attack_hours_later_creates_new_alert(tmp_path):
 
     assert result["alerts_saved"] == 1
     assert len(service.alert_manager.get_alerts()) == 2
+
+
+def test_burst_spanning_two_runs_is_detected(tmp_path):
+    event_file = tmp_path / "events.jsonl"
+    database_file = tmp_path / "cloudsentinel.db"
+    start = datetime(2026, 11, 4, tzinfo=timezone.utc)
+    write_events(event_file, brute_force_events(start)[:2])
+    service = DetectionService(event_file, database_file)
+
+    first_result = service.process_events()
+    assert first_result["alerts_saved"] == 0
+
+    with event_file.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(brute_force_events(start)[2]) + "\n")
+
+    second_result = service.process_events()
+
+    assert second_result["alerts_saved"] == 1

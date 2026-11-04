@@ -1,12 +1,17 @@
 import logging
+import os
 import time
 
 import docker
 from prometheus_client import Gauge, start_http_server
 
-# Logging configuration
+log_level = getattr(
+    logging,
+    os.environ.get("LOG_LEVEL", "INFO").upper(),
+    logging.INFO
+)
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
@@ -33,6 +38,12 @@ EXPORTER_UP = Gauge(
     "cloudsentinel_docker_exporter_up",
     "Whether the Docker exporter can communicate with Docker"
 )
+
+METRIC_LABELS = {
+    CONTAINER_CPU_USAGE: set(),
+    CONTAINER_MEMORY_USAGE: set(),
+    CONTAINER_MEMORY_LIMIT: set()
+}
 
 
 def get_cpu_percentage(stats):
@@ -79,6 +90,19 @@ def get_memory_usage(stats):
     return memory_used, limit
 
 
+def _polling_interval():
+    try:
+        return max(float(os.environ.get(
+            "EXPORTER_INTERVAL_SECONDS",
+            "10"
+        )), 0)
+    except ValueError:
+        logging.warning(
+            "Invalid EXPORTER_INTERVAL_SECONDS; using 10 seconds."
+        )
+        return 10
+
+
 def main():
     logging.info("Connecting to Docker Engine...")
 
@@ -95,11 +119,10 @@ def main():
     while True:
         try:
             containers = client.containers.list()
-            active_names = set()
+            observed_names = set()
 
             for container in containers:
                 name = container.name
-                active_names.add(name)
 
                 try:
                     stats = container.stats(stream=False)
@@ -118,8 +141,9 @@ def main():
                     CONTAINER_MEMORY_LIMIT.labels(
                         container_name=name
                     ).set(memory_limit)
+                    observed_names.add(name)
 
-                    logging.info(
+                    logging.debug(
                         "%s | CPU: %.2f%% | Memory: %.2f MiB",
                         name,
                         cpu_percent,
@@ -133,15 +157,15 @@ def main():
                         error
                     )
 
-            # Remove metrics for containers that are no longer running
+            # Remove metrics for containers that were not updated this loop.
             for metric in (
                 CONTAINER_CPU_USAGE,
                 CONTAINER_MEMORY_USAGE,
                 CONTAINER_MEMORY_LIMIT
             ):
-                for labels in list(metric._metrics.keys()):
-                    if labels[0] not in active_names:
-                        metric.remove(*labels)
+                for name in METRIC_LABELS[metric] - observed_names:
+                    metric.remove(name)
+                METRIC_LABELS[metric] = set(observed_names)
 
             EXPORTER_UP.set(1)
 
@@ -153,7 +177,7 @@ def main():
             EXPORTER_UP.set(0)
             logging.exception("Unexpected exporter error")
 
-        time.sleep(10)
+        time.sleep(_polling_interval())
 
 
 if __name__ == "__main__":

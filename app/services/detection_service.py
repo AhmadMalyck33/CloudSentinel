@@ -16,7 +16,7 @@ class DetectionService:
         event_file: str | Path,
         alert_file: str | Path
     ):
-        self.collector = SecurityLogCollector(event_file)
+        self.collector = SecurityLogCollector(event_file, alert_file)
         self.detector = SecurityDetector()
         self.alert_manager = AlertManager(alert_file)
 

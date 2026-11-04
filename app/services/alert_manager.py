@@ -57,6 +57,14 @@ class AlertManager:
                     detected_at TEXT NOT NULL
                 )
             """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS collector_state (
+                    file_path TEXT PRIMARY KEY,
+                    offset INTEGER NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    recent_events TEXT NOT NULL
+                )
+            """)
 
     def _import_jsonl_if_empty(self) -> None:
         with self._connect() as connection:
@@ -213,5 +221,61 @@ class AlertManager:
                 """,
                 (new_status, json.dumps(alert), alert_id)
             )
+
+        return alert
+
+    def update_alert_status_with_audit(
+        self,
+        alert_id: str,
+        new_status: str,
+        actor: str,
+        reason: str | None
+    ) -> dict[str, Any] | None:
+        """Update an alert and its audit record in one transaction."""
+
+        if new_status not in self.VALID_STATUSES:
+            raise ValueError(
+                f"Invalid status. Choose one of: "
+                f"{', '.join(sorted(self.VALID_STATUSES))}"
+            )
+
+        updated_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT data FROM alerts WHERE alert_id = ?",
+                (alert_id,)
+            ).fetchone()
+            if row is None:
+                return None
+
+            alert = json.loads(row["data"])
+            old_status = alert.get("status", "open")
+            alert["status"] = new_status
+            alert["updated_at"] = updated_at
+            connection.execute(
+                """
+                UPDATE alerts
+                SET status = ?, data = ?
+                WHERE alert_id = ?
+                """,
+                (new_status, json.dumps(alert), alert_id)
+            )
+
+            if old_status != new_status:
+                connection.execute(
+                    """
+                    INSERT INTO audit
+                    (timestamp, alert_id, old_status, new_status, actor, reason)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        updated_at,
+                        alert_id,
+                        old_status,
+                        new_status,
+                        actor,
+                        reason
+                    )
+                )
 
         return alert

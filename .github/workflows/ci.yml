@@ -110,3 +110,18 @@ jobs:
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
+
+      - name: Build Docker Exporter Image
+        run: |
+          docker build -t cloudsentinel-docker-exporter:latest \
+            monitoring/docker-exporter
+
+      - name: Scan Docker Exporter Image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: cloudsentinel-docker-exporter:latest
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'

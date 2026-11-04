@@ -2,6 +2,8 @@
 services:
   
   cloudsentinel-api:
+    mem_limit: 256m
+    cpus: 0.5
     build:
       context: .
       dockerfile: Dockerfile
@@ -13,6 +15,8 @@ services:
       CLOUDSENTINEL_FAILED_LOGIN_THRESHOLD: ${CLOUDSENTINEL_FAILED_LOGIN_THRESHOLD:-3}
       CLOUDSENTINEL_TIME_WINDOW_MINUTES: ${CLOUDSENTINEL_TIME_WINDOW_MINUTES:-5}
       CLOUDSENTINEL_PORT_SCAN_THRESHOLD: ${CLOUDSENTINEL_PORT_SCAN_THRESHOLD:-5}
+      PROMETHEUS_URL: http://prometheus:9090
+      CLOUDSENTINEL_DISABLE_BACKGROUND_DETECTION: "true"
     ports:
       - "5000:5000"
     healthcheck:
@@ -30,13 +34,39 @@ services:
     restart: unless-stopped
 
 
+  detector:
+    mem_limit: 128m
+    cpus: 0.25
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cloudsentinel-detector
+    user: "1000:1000"
+    command: ["python", "-m", "app.worker"]
+    environment:
+      CLOUDSENTINEL_API_KEY: ${CLOUDSENTINEL_API_KEY:?Set CLOUDSENTINEL_API_KEY in .env}
+      ALERTMANAGER_WEBHOOK_TOKEN: ${ALERTMANAGER_WEBHOOK_TOKEN:?Set ALERTMANAGER_WEBHOOK_TOKEN in .env}
+      CLOUDSENTINEL_FAILED_LOGIN_THRESHOLD: ${CLOUDSENTINEL_FAILED_LOGIN_THRESHOLD:-3}
+      CLOUDSENTINEL_TIME_WINDOW_MINUTES: ${CLOUDSENTINEL_TIME_WINDOW_MINUTES:-5}
+      CLOUDSENTINEL_PORT_SCAN_THRESHOLD: ${CLOUDSENTINEL_PORT_SCAN_THRESHOLD:-5}
+      PROMETHEUS_URL: http://prometheus:9090
+      CLOUDSENTINEL_DETECTION_INTERVAL: ${CLOUDSENTINEL_DETECTION_INTERVAL:-10}
+    volumes:
+      - ./data/security:/app/data/security
+    restart: unless-stopped
+
+
   docker-exporter:
+    mem_limit: 128m
+    cpus: 0.25
     build:
       context: ./monitoring/docker-exporter
       dockerfile: Dockerfile
     container_name: cloudsentinel-docker-exporter
     environment:
       DOCKER_HOST: tcp://docker-socket-proxy:2375
+      EXPORTER_INTERVAL_SECONDS: ${EXPORTER_INTERVAL_SECONDS:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     networks:
       - default
       - docker-socket
@@ -58,6 +88,7 @@ services:
     restart: unless-stopped
 
   docker-socket-proxy:
+    mem_limit: 64m
     image: tecnativa/docker-socket-proxy:0.1.2
     container_name: cloudsentinel-docker-socket-proxy
     environment:
@@ -70,6 +101,7 @@ services:
     restart: unless-stopped
 
   alertmanager:
+    mem_limit: 128m
     image: prom/alertmanager:v0.27.0
     container_name: cloudsentinel-alertmanager
     environment:
@@ -101,6 +133,7 @@ services:
     restart: unless-stopped
 
   prometheus:
+    mem_limit: 512m
     image: prom/prometheus:v2.55.1
     container_name: cloudsentinel-prometheus
     ports:
@@ -133,6 +166,7 @@ services:
     restart: unless-stopped
 
   grafana:
+    mem_limit: 512m
     image: grafana/grafana:11.4.0
     container_name: cloudsentinel-grafana
     environment:

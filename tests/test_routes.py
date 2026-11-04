@@ -179,6 +179,54 @@ def test_demo_login_records_success_and_failure(client, tmp_path, monkeypatch):
     assert all(event["source_ip"] == "127.0.0.1" for event in events)
 
 
+@pytest.mark.parametrize("payload", [
+    {"username": "", "password": "x"},
+    {"username": "x" * 65, "password": "x"},
+    {"username": "x", "password": ""},
+    {"username": "x", "password": "x" * 65}
+])
+def test_demo_login_rejects_invalid_lengths(
+    client, tmp_path, monkeypatch, payload
+):
+    monkeypatch.setattr(routes, "EVENT_FILE", tmp_path / "events.jsonl")
+    response = client.post("/demo/login", json=payload)
+    assert response.status_code == 400
+
+
+def test_demo_login_rate_limit_returns_retry_after(
+    client, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(routes, "EVENT_FILE", tmp_path / "events.jsonl")
+    monkeypatch.setenv("CLOUDSENTINEL_LOGIN_RATE_LIMIT", "1")
+    with routes.LOGIN_REQUESTS_LOCK:
+        routes.LOGIN_REQUESTS.clear()
+
+    client.post("/demo/login", json={"username": "a", "password": "b"})
+    response = client.post(
+        "/demo/login",
+        json={"username": "a", "password": "b"}
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+
+
+def test_demo_login_rejects_event_file_over_limit(
+    client, tmp_path, monkeypatch
+):
+    event_file = tmp_path / "events.jsonl"
+    event_file.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(routes, "EVENT_FILE", event_file)
+    monkeypatch.setenv("CLOUDSENTINEL_MAX_EVENT_FILE_MB", "0")
+
+    response = client.post(
+        "/demo/login",
+        json={"username": "a", "password": "b"}
+    )
+
+    assert response.status_code == 503
+
+
 def test_five_failed_demo_logins_create_brute_force_alert(
     client, tmp_path, monkeypatch
 ):
@@ -264,8 +312,15 @@ def test_api_trends_returns_hourly_and_top_source_data(
             "severity": "high"
         },
         {
-            "alert_type": "port_scan",
+            "alert_type": "port_scan_detected",
             "source_ip": "192.0.2.10",
+            "severity": "medium"
+        },
+        {
+            "alert_type": "service_alert",
+            "alert_name": "CloudSentinelApiDown",
+            "summary": "API is unavailable",
+            "source_ip": "docker-exporter:9323",
             "severity": "medium"
         }
     ])
@@ -278,7 +333,7 @@ def test_api_trends_returns_hourly_and_top_source_data(
     assert data["top_source_ips"] == [
         {"source_ip": "192.0.2.10", "count": 2}
     ]
-    assert sum(item["count"] for item in data["alerts_per_hour"]) == 2
+    assert sum(item["count"] for item in data["alerts_per_hour"]) == 3
 
 
 def test_api_trends_returns_empty_datasets(client, security_files):
@@ -288,6 +343,22 @@ def test_api_trends_returns_empty_datasets(client, security_files):
     assert response.get_json() == {
         "alerts_per_hour": [],
         "top_source_ips": []
+    }
+
+
+@pytest.mark.parametrize("prometheus_url", ["file:///tmp/prometheus", "not-a-url"])
+def test_prometheus_invalid_url_returns_safe_statuses(
+    client, monkeypatch, prometheus_url
+):
+    monkeypatch.setenv("PROMETHEUS_URL", prometheus_url)
+
+    status_response = client.get("/api/status")
+    infrastructure_response = client.get("/api/infrastructure")
+
+    assert status_response.get_json()["exporter"] == "unknown"
+    assert infrastructure_response.get_json() == {
+        "status": "unavailable",
+        "containers": []
     }
 
 
@@ -419,7 +490,8 @@ def test_alertmanager_webhook_saves_and_deduplicates_firing_alert(
         "alerts_received": 2,
         "firing_alerts": 1,
         "alerts_saved": 1,
-        "duplicates_skipped": 0
+        "duplicates_skipped": 0,
+        "alerts_resolved": 0
     }
 
     duplicate_response = client.post(
@@ -435,8 +507,92 @@ def test_alertmanager_webhook_saves_and_deduplicates_firing_alert(
     alerts = client.get("/alerts").get_json()["alerts"]
     assert len(alerts) == 1
     assert alerts[0]["alert_type"] == "service_alert"
-    assert alerts[0]["severity"] == "warning"
+    assert alerts[0]["severity"] == "medium"
+    assert alerts[0]["original_severity"] == "warning"
     assert alerts[0]["fingerprint"] == "fingerprint-1"
+
+
+def test_alertmanager_webhook_resolves_and_refires_alert(
+    client, security_files, monkeypatch
+):
+    monkeypatch.setenv("ALERTMANAGER_WEBHOOK_TOKEN", "webhook-token")
+    headers = {"Authorization": "Bearer webhook-token"}
+    alert = {
+        "status": "firing",
+        "fingerprint": "repeatable",
+        "labels": {"alertname": "HighContainerCpu", "severity": "critical"},
+        "annotations": {"summary": "CPU high"}
+    }
+
+    assert client.post(
+        "/webhooks/alertmanager",
+        json={"alerts": [alert]},
+        headers=headers
+    ).get_json()["alerts_saved"] == 1
+    assert client.post(
+        "/webhooks/alertmanager",
+        json={"alerts": [alert]},
+        headers=headers
+    ).get_json()["duplicates_skipped"] == 1
+
+    resolved = dict(alert)
+    resolved["status"] = "resolved"
+    response = client.post(
+        "/webhooks/alertmanager",
+        json={"alerts": [resolved]},
+        headers=headers
+    )
+    assert response.get_json()["alerts_resolved"] == 1
+
+    audit = client.get("/audit").get_json()["records"]
+    assert audit[-1]["actor"] == "alertmanager"
+    assert audit[-1]["reason"] == "Alert resolved automatically"
+
+    response = client.post(
+        "/webhooks/alertmanager",
+        json={"alerts": [alert]},
+        headers=headers
+    )
+    assert response.get_json()["alerts_saved"] == 1
+    assert len(client.get("/alerts").get_json()["alerts"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("severity", "expected"),
+    [("info", "low"), ("unexpected", "medium")]
+)
+def test_alertmanager_webhook_normalizes_severity(
+    client, security_files, monkeypatch, severity, expected
+):
+    monkeypatch.setenv("ALERTMANAGER_WEBHOOK_TOKEN", "webhook-token")
+    response = client.post(
+        "/webhooks/alertmanager",
+        json={"alerts": [{
+            "status": "firing",
+            "fingerprint": severity,
+            "labels": {"severity": severity},
+            "annotations": {}
+        }]},
+        headers={"Authorization": "Bearer webhook-token"}
+    )
+
+    assert response.status_code == 200
+    alert = client.get("/alerts").get_json()["alerts"][0]
+    assert alert["severity"] == expected
+    assert alert["original_severity"] == severity
+
+
+def test_alertmanager_webhook_rejects_oversize_payload(
+    client, monkeypatch
+):
+    monkeypatch.setenv("ALERTMANAGER_WEBHOOK_TOKEN", "webhook-token")
+    response = client.post(
+        "/webhooks/alertmanager",
+        json={"alerts": [{}] * 101},
+        headers={"Authorization": "Bearer webhook-token"}
+    )
+
+    assert response.status_code == 413
 
 
 @pytest.mark.parametrize(
@@ -471,10 +627,10 @@ def test_alertmanager_webhook_rejects_invalid_auth(
 
 
 def test_process_events(client, security_files, monkeypatch):
-    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key-12345678")
     response = client.post(
         "/process-events",
-        headers={"X-API-Key": "test-key"}
+        headers={"X-API-Key": "test-key-12345678"}
     )
 
     assert response.status_code == 200
@@ -494,10 +650,10 @@ def test_metrics(client):
 
 
 def test_metrics_include_alert_gauge(client, security_files, monkeypatch):
-    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key-12345678")
     client.post(
         "/process-events",
-        headers={"X-API-Key": "test-key"}
+        headers={"X-API-Key": "test-key-12345678"}
     )
 
     response = client.get("/metrics")
@@ -509,19 +665,45 @@ def test_metrics_include_alert_gauge(client, security_files, monkeypatch):
     )
 
 
+def test_metrics_alert_gauge_refreshes_after_resolution(
+    client, test_alert, monkeypatch, tmp_path
+):
+    multiprocess_directory = tmp_path / "prometheus"
+    multiprocess_directory.mkdir()
+    monkeypatch.setenv(
+        "PROMETHEUS_MULTIPROC_DIR",
+        str(multiprocess_directory)
+    )
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key-12345678")
+
+    response = client.get("/metrics")
+    assert b'cloudsentinel_alerts{severity="high",status="open"} 1.0' in response.data
+
+    response = client.patch(
+        f"/alerts/{test_alert['alert_id']}/status",
+        headers={"X-API-Key": "test-key-12345678"},
+        json={"status": "resolved", "actor": "tester"}
+    )
+    assert response.status_code == 200
+
+    response = client.get("/metrics")
+    assert b'cloudsentinel_alerts{severity="high",status="open"} 0.0' in response.data
+    assert b'cloudsentinel_alerts{severity="high",status="resolved"} 1.0' in response.data
+
+
 def test_metrics_include_detection_counter(
     client, security_files, monkeypatch
 ):
-    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key-12345678")
     client.post(
         "/process-events",
-        headers={"X-API-Key": "test-key"}
+        headers={"X-API-Key": "test-key-12345678"}
     )
 
     first_metrics = client.get("/metrics").data
     client.post(
         "/process-events",
-        headers={"X-API-Key": "test-key"}
+        headers={"X-API-Key": "test-key-12345678"}
     )
     second_metrics = client.get("/metrics").data
 
@@ -552,14 +734,14 @@ def test_metrics_track_duration_and_404(client):
 
 
 def test_update_alert_status(client, test_alert, monkeypatch):
-    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key-12345678")
     alert_id = test_alert["alert_id"]
 
     # First update: open -> acknowledged
     response = client.patch(
         f"/alerts/{alert_id}/status",
         json={"status": "acknowledged"},
-        headers={"X-API-Key": "test-key"}
+        headers={"X-API-Key": "test-key-12345678"}
     )
 
     assert response.status_code == 200
@@ -582,7 +764,7 @@ def test_update_alert_status(client, test_alert, monkeypatch):
             "actor": "operator",
             "reason": "Confirmed investigation complete"
         },
-        headers={"X-API-Key": "test-key"}
+        headers={"X-API-Key": "test-key-12345678"}
     )
 
     assert response.status_code == 200
@@ -602,13 +784,13 @@ def test_update_alert_status(client, test_alert, monkeypatch):
 
 
 def test_invalid_alert_status(client, test_alert, monkeypatch):
-    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key-12345678")
     alert_id = test_alert["alert_id"]
 
     response = client.patch(
         f"/alerts/{alert_id}/status",
         json={"status": "invalid"},
-        headers={"X-API-Key": "test-key"}
+        headers={"X-API-Key": "test-key-12345678"}
     )
 
     assert response.status_code == 400
@@ -621,27 +803,28 @@ def test_invalid_alert_status(client, test_alert, monkeypatch):
 @pytest.mark.parametrize("payload", [
     {"status": "acknowledged", "actor": ""},
     {"status": "acknowledged", "actor": 123},
+    {"status": "acknowledged", "actor": "x" * 51},
     {"status": "acknowledged", "reason": 123},
     {"status": "acknowledged", "reason": "x" * 201}
 ])
 def test_invalid_audit_fields(client, test_alert, monkeypatch, payload):
-    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key-12345678")
 
     response = client.patch(
         f"/alerts/{test_alert['alert_id']}/status",
         json=payload,
-        headers={"X-API-Key": "test-key"}
+        headers={"X-API-Key": "test-key-12345678"}
     )
 
     assert response.status_code == 400
 
 
 def test_missing_alert(client, security_files, monkeypatch):
-    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key-12345678")
     response = client.patch(
         "/alerts/nonexistent-alert-id/status",
         json={"status": "resolved"},
-        headers={"X-API-Key": "test-key"}
+        headers={"X-API-Key": "test-key-12345678"}
     )
 
     assert response.status_code == 404
@@ -669,6 +852,22 @@ def test_write_operation_requires_configured_key(
     assert response.status_code == 503
 
 
+def test_write_operation_rejects_short_configured_key(
+    client, monkeypatch
+):
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "short-key")
+
+    response = client.post(
+        "/process-events",
+        headers={"X-API-Key": "short-key"}
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["message"] == (
+        "Write operations are not configured."
+    )
+
+
 @pytest.mark.parametrize("method, path", [
     ("post", "/process-events"),
     ("patch", "/alerts/nonexistent-alert-id/status")
@@ -676,7 +875,7 @@ def test_write_operation_requires_configured_key(
 def test_write_operation_rejects_missing_header(
     client, method, path, monkeypatch
 ):
-    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key-12345678")
 
     response = getattr(client, method)(
         path,
@@ -693,7 +892,7 @@ def test_write_operation_rejects_missing_header(
 def test_write_operation_rejects_wrong_key(
     client, method, path, monkeypatch
 ):
-    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key-12345678")
 
     response = getattr(client, method)(
         path,
@@ -711,11 +910,11 @@ def test_write_operation_rejects_wrong_key(
 def test_write_operation_accepts_correct_key(
     client, security_files, method, path, monkeypatch
 ):
-    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDSENTINEL_API_KEY", "test-key-12345678")
 
     response = getattr(client, method)(
         path,
-        headers={"X-API-Key": "test-key"},
+        headers={"X-API-Key": "test-key-12345678"},
         json={"status": "resolved"} if method == "patch" else None
     )
 

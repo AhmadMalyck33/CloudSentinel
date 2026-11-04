@@ -1,4 +1,6 @@
 
+import sqlite3
+
 from app.services.log_collector import SecurityLogCollector
 
 
@@ -87,3 +89,46 @@ def test_empty_lines_are_ignored(tmp_path):
     events = collector.collect_events()
 
     assert len(events) == 1
+
+
+def test_collector_reads_only_appended_events(tmp_path):
+    log_file = tmp_path / "events.jsonl"
+    database_file = tmp_path / "cloudsentinel.db"
+    log_file.write_text(
+        '{"event_type": "login_failure", "timestamp": "2026-11-04T10:00:00Z"}\n',
+        encoding="utf-8"
+    )
+    collector = SecurityLogCollector(log_file, database_file)
+
+    assert len(collector.collect_events()) == 1
+    with log_file.open("a", encoding="utf-8") as file:
+        file.write(
+            '{"event_type": "login_failure", "timestamp": "2026-11-04T10:01:00Z"}\n'
+        )
+
+    assert len(collector.collect_events()) == 2
+    with sqlite3.connect(database_file) as connection:
+        state = connection.execute(
+            "SELECT offset, file_size FROM collector_state"
+        ).fetchone()
+    assert state == (log_file.stat().st_size, log_file.stat().st_size)
+
+
+def test_collector_resets_after_file_truncation(tmp_path):
+    log_file = tmp_path / "events.jsonl"
+    database_file = tmp_path / "cloudsentinel.db"
+    log_file.write_text(
+        '{"event_type": "login_failure", "timestamp": "2026-11-04T10:00:00Z"}\n',
+        encoding="utf-8"
+    )
+    collector = SecurityLogCollector(log_file, database_file)
+    collector.collect_events()
+    log_file.write_text(
+        '{"event_type": "login_success"}\n',
+        encoding="utf-8"
+    )
+
+    events = collector.collect_events()
+
+    assert len(events) == 1
+    assert events[0]["event_type"] == "login_success"

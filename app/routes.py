@@ -1,10 +1,13 @@
 
 import hmac
 import json
+import logging
 import os
 import sqlite3
+import threading
 import time
 from collections import Counter as ValueCounter
+from collections import defaultdict, deque
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,18 +39,21 @@ from app.metrics import ALERTS
 
 
 main = Blueprint("main", __name__)
+logger = logging.getLogger(__name__)
 
 
-def _validated_prometheus_url() -> str | None:
+def _prometheus_get(path_and_query: str):
     prometheus_url = os.environ.get("PROMETHEUS_URL")
     if not prometheus_url:
-        return None
+        raise ValueError("PROMETHEUS_URL is not configured.")
 
     parsed_url = urllib.parse.urlparse(prometheus_url)
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-        return None
+        raise ValueError("PROMETHEUS_URL must use http or https.")
 
-    return prometheus_url.rstrip("/")
+    url = f"{prometheus_url.rstrip('/')}{path_and_query}"
+    with urllib.request.urlopen(url, timeout=2) as response:  # nosec B310 - scheme is validated above
+        return json.load(response)
 
 
 # Dashboard frontend route
@@ -74,6 +80,8 @@ HTTP_REQUEST_DURATION = Histogram(
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 EVENT_FILE = PROJECT_ROOT / "data" / "security" / "events.jsonl"
+LOGIN_REQUESTS = defaultdict(deque)
+LOGIN_REQUESTS_LOCK = threading.Lock()
 
 
 def get_database_path() -> Path:
@@ -81,6 +89,41 @@ def get_database_path() -> Path:
         "CLOUDSENTINEL_DB",
         PROJECT_ROOT / "data" / "security" / "cloudsentinel.db"
     ))
+
+
+def _login_rate_limit() -> int:
+    try:
+        return max(int(os.environ.get(
+            "CLOUDSENTINEL_LOGIN_RATE_LIMIT",
+            "20"
+        )), 0)
+    except ValueError:
+        return 20
+
+
+def _event_file_max_bytes() -> int:
+    try:
+        megabytes = float(os.environ.get(
+            "CLOUDSENTINEL_MAX_EVENT_FILE_MB",
+            "10"
+        ))
+    except ValueError:
+        megabytes = 10
+    return max(int(megabytes * 1024 * 1024), 0)
+
+
+def _login_rate_limited(remote_addr: str) -> bool:
+    now = time.monotonic()
+    cutoff = now - 60
+    limit = _login_rate_limit()
+    with LOGIN_REQUESTS_LOCK:
+        requests = LOGIN_REQUESTS[remote_addr]
+        while requests and requests[0] <= cutoff:
+            requests.popleft()
+        if len(requests) >= limit:
+            return True
+        requests.append(now)
+    return False
 
 
 def register_metrics_hooks(app):
@@ -116,7 +159,11 @@ def register_metrics_hooks(app):
 def require_api_key():
     configured_key = os.environ.get("CLOUDSENTINEL_API_KEY")
 
-    if not configured_key:
+    if not configured_key or len(configured_key) < 16:
+        if configured_key:
+            logger.warning(
+                "CLOUDSENTINEL_API_KEY must be at least 16 characters."
+            )
         return jsonify({
             "status": "error",
             "message": "Write operations are not configured."
@@ -190,18 +237,12 @@ def _database_status() -> str:
 
 
 def _exporter_status() -> str:
-    prometheus_url = _validated_prometheus_url()
-    if not prometheus_url:
-        return "unknown"
-
     query = urllib.parse.urlencode({
         "query": 'up{job="docker-exporter"}'
     })
-    url = f"{prometheus_url.rstrip('/')}/api/v1/query?{query}"
 
     try:
-        with urllib.request.urlopen(url, timeout=2) as response:  # nosec B310
-            payload = json.load(response)
+        payload = _prometheus_get(f"/api/v1/query?{query}")
     except (OSError, ValueError, urllib.error.URLError):
         return "unknown"
 
@@ -253,6 +294,14 @@ def api_status():
 
 @main.route("/demo/login", methods=["POST"])
 def demo_login():
+    if _login_rate_limited(request.remote_addr or "unknown"):
+        response = jsonify({
+            "status": "error",
+            "message": "Too many login requests. Try again later."
+        })
+        response.headers["Retry-After"] = "60"
+        return response, 429
+
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({
@@ -267,6 +316,16 @@ def demo_login():
             "status": "error",
             "message": "Username and password must be strings."
         }), 400
+    if not 1 <= len(username) <= 64:
+        return jsonify({
+            "status": "error",
+            "message": "Username must be between 1 and 64 characters."
+        }), 400
+    if not 1 <= len(password) <= 64:
+        return jsonify({
+            "status": "error",
+            "message": "Password must be between 1 and 64 characters."
+        }), 400
 
     event_type = (
         "login_success"
@@ -280,9 +339,20 @@ def demo_login():
         "source_ip": request.remote_addr
     }
 
+    serialized_event = (json.dumps(event) + "\n").encode("utf-8")
+    try:
+        current_size = EVENT_FILE.stat().st_size if EVENT_FILE.exists() else 0
+    except OSError:
+        current_size = 0
+    if current_size + len(serialized_event) > _event_file_max_bytes():
+        return jsonify({
+            "status": "error",
+            "message": "Security event storage is full."
+        }), 503
+
     EVENT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with EVENT_FILE.open("a", encoding="utf-8") as file:
-        file.write(json.dumps(event) + "\n")
+    with EVENT_FILE.open("ab") as file:
+        file.write(serialized_event)
 
     if event_type == "login_success":
         return jsonify({
@@ -392,7 +462,13 @@ def api_trends():
     source_counts = ValueCounter(
         alert.get("source_ip")
         for alert, _ in recent_alerts
-        if alert.get("source_ip")
+        if (
+            alert.get("source_ip")
+            and alert.get("alert_type") in {
+                "brute_force_attempt",
+                "port_scan_detected"
+            }
+        )
     )
 
     return jsonify({
@@ -411,12 +487,9 @@ INFRASTRUCTURE_QUERIES = (
 )
 
 
-def _query_prometheus_metric(prometheus_url: str, metric: str) -> list:
+def _query_prometheus_metric(metric: str) -> list:
     query = urllib.parse.urlencode({"query": metric})
-    url = f"{prometheus_url}/api/v1/query?{query}"
-
-    with urllib.request.urlopen(url, timeout=2) as response:  # nosec B310
-        payload = json.load(response)
+    payload = _prometheus_get(f"/api/v1/query?{query}")
 
     if not isinstance(payload, dict) or payload.get("status") != "success":
         raise ValueError("Invalid Prometheus response.")
@@ -431,16 +504,9 @@ def _query_prometheus_metric(prometheus_url: str, metric: str) -> list:
 
 @main.route("/api/infrastructure", methods=["GET"])
 def api_infrastructure():
-    prometheus_url = _validated_prometheus_url()
-    if not prometheus_url:
-        return jsonify({
-            "status": "unavailable",
-            "containers": []
-        }), 200
-
     try:
         metric_results = {
-            metric: _query_prometheus_metric(prometheus_url, metric)
+            metric: _query_prometheus_metric(metric)
             for metric in INFRASTRUCTURE_QUERIES
         }
     except (OSError, ValueError, urllib.error.URLError):
@@ -535,6 +601,11 @@ def update_alert_status(alert_id):
             "status": "error",
             "message": "Actor must be a non-empty string."
         }), 400
+    if len(actor) > 50:
+        return jsonify({
+            "status": "error",
+            "message": "Actor must be 50 characters or fewer."
+        }), 400
 
     if reason is not None and not isinstance(reason, str):
         return jsonify({
@@ -549,19 +620,12 @@ def update_alert_status(alert_id):
         }), 400
 
     manager = AlertManager(get_database_path())
-    existing_alert = next(
-        (
-            alert
-            for alert in manager.get_alerts()
-            if alert.get("alert_id") == alert_id
-        ),
-        None
-    )
-
     try:
-        updated_alert = manager.update_alert_status(
+        updated_alert = manager.update_alert_status_with_audit(
             alert_id=alert_id,
-            new_status=new_status
+            new_status=new_status,
+            actor=actor,
+            reason=reason
         )
 
     except ValueError as error:
@@ -575,17 +639,6 @@ def update_alert_status(alert_id):
             "status": "error",
             "message": "Alert not found."
         }), 404
-
-    if existing_alert is not None and (
-        existing_alert.get("status") != updated_alert.get("status")
-    ):
-        AuditManager(get_database_path()).append_record(
-            alert_id=alert_id,
-            old_status=existing_alert.get("status", "open"),
-            new_status=new_status,
-            actor=actor,
-            reason=reason
-        )
 
     return jsonify({
         "status": "success",
@@ -626,8 +679,14 @@ def alertmanager_webhook():
             "status": "error",
             "message": "Alertmanager payload must contain an alerts list."
         }), 400
+    if len(payload["alerts"]) > 100:
+        return jsonify({
+            "status": "error",
+            "message": "Alertmanager payload cannot contain more than 100 alerts."
+        }), 413
 
     firing_alerts = []
+    resolved_fingerprints = []
     for alert in payload["alerts"]:
         if not isinstance(alert, dict):
             return jsonify({
@@ -635,7 +694,8 @@ def alertmanager_webhook():
                 "message": "Each Alertmanager alert must be an object."
             }), 400
 
-        if alert.get("status") != "firing":
+        alert_status = alert.get("status")
+        if alert_status not in {"firing", "resolved"}:
             continue
 
         fingerprint = alert.get("fingerprint")
@@ -648,8 +708,12 @@ def alertmanager_webhook():
         if not isinstance(labels, dict):
             return jsonify({
                 "status": "error",
-                "message": "Firing alerts require labels."
+                "message": "Alertmanager alerts require labels."
             }), 400
+        if alert_status == "resolved":
+            resolved_fingerprints.append(fingerprint)
+            continue
+
         annotations = alert.get("annotations", {})
         if not isinstance(annotations, dict):
             return jsonify({
@@ -657,9 +721,16 @@ def alertmanager_webhook():
                 "message": "Alert annotations must be an object."
             }), 400
 
+        original_severity = labels.get("severity", "unknown")
+        normalized_severity = {
+            "warning": "medium",
+            "critical": "critical",
+            "info": "low"
+        }.get(original_severity, "medium")
         firing_alerts.append({
             "alert_type": "service_alert",
-            "severity": labels.get("severity", "unknown"),
+            "severity": normalized_severity,
+            "original_severity": original_severity,
             "source_ip": labels.get("instance"),
             "destination_ip": labels.get("job"),
             "alert_name": labels.get("alertname", "unknown"),
@@ -672,6 +743,7 @@ def alertmanager_webhook():
         alert.get("fingerprint")
         for alert in manager.get_alerts()
         if alert.get("alert_type") == "service_alert"
+        and alert.get("status") != "resolved"
     }
     new_alerts = []
     for alert in firing_alerts:
@@ -680,35 +752,46 @@ def alertmanager_webhook():
             existing_fingerprints.add(alert["fingerprint"])
 
     saved_count = manager.save_alerts(new_alerts)
+    alerts_resolved = 0
+    for fingerprint in resolved_fingerprints:
+        matching_alert = next(
+            (
+                alert for alert in manager.get_alerts()
+                if (
+                    alert.get("alert_type") == "service_alert"
+                    and alert.get("fingerprint") == fingerprint
+                    and alert.get("status") in {"open", "acknowledged"}
+                )
+            ),
+            None
+        )
+        if matching_alert is None:
+            continue
+
+        manager.update_alert_status_with_audit(
+            matching_alert["alert_id"],
+            "resolved",
+            "alertmanager",
+            "Alert resolved automatically"
+        )
+        alerts_resolved += 1
 
     return jsonify({
         "status": "success",
         "alerts_received": len(payload["alerts"]),
         "firing_alerts": len(firing_alerts),
         "alerts_saved": saved_count,
-        "duplicates_skipped": len(firing_alerts) - saved_count
+        "duplicates_skipped": len(firing_alerts) - saved_count,
+        "alerts_resolved": alerts_resolved
     }), 200
 
 
 # Prometheus metrics endpoint
 @main.route("/metrics", methods=["GET"])
 def metrics():
-    alerts = AlertManager(get_database_path()).get_alerts()
-    ALERTS.clear()
-
-    counts = {}
-    for alert in alerts:
-        key = (
-            alert.get("status", "open"),
-            alert.get("severity", "unknown")
-        )
-        counts[key] = counts.get(key, 0) + 1
-
-    for (status, severity), count in counts.items():
-        ALERTS.labels(status=status, severity=severity).set(count)
-
     if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
         registry = CollectorRegistry()
+        registry.register(ALERTS)
         multiprocess.MultiProcessCollector(registry)
         metrics_output = generate_latest(registry)
     else:

@@ -23,7 +23,7 @@
 
             <nav>
                 <a href="/dashboard" class="nav-item active">Dashboard</a>
-                <a href="#security-alerts" class="nav-item">Security Alerts</a>
+                <a href="#alerts-panel" class="nav-item">Security Alerts</a>
                 <a id="prometheus-link" href="#" class="nav-item"
                    target="_blank">Prometheus</a>
                 <a id="grafana-link" href="#" class="nav-item"
@@ -207,7 +207,7 @@
                         <thead>
                             <tr>
                                 <th>Alert Type</th>
-                                <th>Source IP</th>
+                                <th>Source / Target</th>
                                 <th>Severity</th>
                                 <th>Status</th>
                                 <th>Generated At</th>
@@ -231,7 +231,8 @@
                     </div>
                 </div>
 
-                <p id="alert-message" role="status" aria-live="polite"></p>
+                <p id="alert-message" role="status" aria-live="polite"
+                   aria-label="Dashboard status message"></p>
 
             </section>
 

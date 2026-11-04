@@ -14,6 +14,25 @@ let currentPage = 1;
 let loadedAuditRecords = [];
 let auditPage = 1;
 const alertsPerPage = 10;
+let statusMessageTimer = null;
+
+
+function showStatusMessage(text, isError = false) {
+    const message = document.getElementById("alert-message");
+    if (statusMessageTimer) {
+        clearTimeout(statusMessageTimer);
+        statusMessageTimer = null;
+    }
+    message.textContent = text;
+    message.className = isError ? "error-message" : "success-message";
+    if (!isError) {
+        statusMessageTimer = setTimeout(() => {
+            message.textContent = "";
+            message.className = "";
+            statusMessageTimer = null;
+        }, 6000);
+    }
+}
 
 
 function apiFetch(url, options = {}) {
@@ -154,7 +173,8 @@ async function createAlertDetailRow(alert, row) {
     historyContainer.className = "alert-history";
 
     appendDetailField(fields, "Description", alert.description);
-    appendDetailField(fields, "Source IP", alert.source_ip);
+    appendDetailField(fields, "Summary", alert.summary);
+    appendDetailField(fields, "Source / Target", alert.source_ip);
     appendDetailField(fields, "Destination IP", alert.destination_ip);
     appendDetailField(fields, "Failed attempts", alert.failed_attempts);
     appendDetailField(fields, "Unique ports", alert.unique_ports);
@@ -232,9 +252,19 @@ async function toggleAlertDetails(alert, row) {
 function populateAlertTypes() {
     const typeFilter = document.getElementById("type-filter");
     const selectedType = typeFilter.value;
-    const types = [...new Set(
-        loadedAlerts.map(alert => alert.alert_type || "Unknown")
-    )].sort();
+    const types = new Map();
+    loadedAlerts.forEach(alert => {
+        const alertType = alert.alert_type || "Unknown";
+        const alertName = alert.alert_name;
+        const summary = alert.summary;
+        types.set(alertType, alertType);
+        if (alertName) {
+            types.set(alertName, alertName);
+        }
+        if (summary) {
+            types.set(summary, summary);
+        }
+    });
 
     typeFilter.replaceChildren();
     const allOption = document.createElement("option");
@@ -242,14 +272,14 @@ function populateAlertTypes() {
     allOption.textContent = "All";
     typeFilter.appendChild(allOption);
 
-    types.forEach(type => {
+    [...types.keys()].sort().forEach(type => {
         const option = document.createElement("option");
         option.value = type;
-        option.textContent = type;
+        option.textContent = types.get(type);
         typeFilter.appendChild(option);
     });
 
-    typeFilter.value = types.includes(selectedType) ? selectedType : "all";
+    typeFilter.value = types.has(selectedType) ? selectedType : "all";
 }
 
 
@@ -265,11 +295,14 @@ function getFilteredAlerts() {
         const alertStatus = (alert.status || "open").toLowerCase();
         const alertSeverity = (alert.severity || "low").toLowerCase();
         const alertType = alert.alert_type || "Unknown";
+        const alertName = alert.alert_name || "";
+        const summary = alert.summary || "";
         const sourceIp = (alert.source_ip || "").toLowerCase();
 
         return (status === "all" || alertStatus === status) &&
             (severity === "all" || alertSeverity === severity) &&
-            (type === "all" || alertType === type) &&
+            (type === "all" ||
+                [alertType, alertName, summary].includes(type)) &&
             sourceIp.includes(source);
     });
 }
@@ -313,9 +346,10 @@ function renderAlerts() {
 
             // Alert type
             const typeCell = row.insertCell();
-            typeCell.textContent = alert.alert_type || "Unknown";
+            typeCell.textContent =
+                alert.alert_name || alert.alert_type || "Unknown";
 
-            // Source IP
+            // Source / target
             const ipCell = row.insertCell();
             ipCell.textContent = alert.source_ip || "Unknown";
 
@@ -669,8 +703,8 @@ function renderHourlyChart(hourlyData) {
         return;
     }
 
-    const width = 600;
-    const height = 220;
+    const width = 700;
+    const height = 240;
     const chart = createSvgElement("svg", {
         viewBox: `0 0 ${width} ${height}`,
         role: "img",
@@ -680,15 +714,32 @@ function renderHourlyChart(hourlyData) {
         1,
         ...hourlyData.map(item => Number(item.count) || 0)
     );
-    const barWidth = 18;
-    const gap = 6;
-    const chartHeight = 155;
-    const baseY = 180;
+    const chartLeft = 42;
+    const chartTop = 18;
+    const chartHeight = 165;
+    const baseY = chartTop + chartHeight;
+    const barWidth = 20;
+    const gap = 7;
+    const currentHour = new Date();
+    const tickStep = Math.max(1, Math.ceil(maxCount / 5));
+
+    for (let tick = 0; tick <= maxCount; tick += tickStep) {
+        const y = baseY - (tick / maxCount) * chartHeight;
+        const tickLabel = createSvgElement("text", {
+            x: chartLeft - 7,
+            y: y + 4,
+            "text-anchor": "end",
+            fill: "#94a3b8",
+            "font-size": "10"
+        });
+        tickLabel.textContent = String(tick);
+        chart.appendChild(tickLabel);
+    }
 
     hourlyData.forEach((item, index) => {
         const count = Number(item.count) || 0;
         const barHeight = (count / maxCount) * chartHeight;
-        const x = 25 + index * (barWidth + gap);
+        const x = chartLeft + index * (barWidth + gap);
         const bar = createSvgElement("rect", {
             x,
             y: baseY - barHeight,
@@ -699,14 +750,29 @@ function renderHourlyChart(hourlyData) {
         });
         const label = createSvgElement("text", {
             x: x + barWidth / 2,
-            y: 205,
+            y: 220,
             "text-anchor": "middle",
             fill: "#94a3b8",
             "font-size": "9"
         });
-        label.textContent = index % 4 === 0
-            ? new Date(item.hour).getHours().toString().padStart(2, "0")
+        const itemDate = new Date(item.hour);
+        const isCurrentHour =
+            itemDate.toDateString() === currentHour.toDateString() &&
+            itemDate.getHours() === currentHour.getHours();
+        label.textContent = index % 3 === 0 || isCurrentHour
+            ? itemDate.getHours().toString().padStart(2, "0")
             : "";
+        if (count > 0) {
+            const valueLabel = createSvgElement("text", {
+                x: x + barWidth / 2,
+                y: baseY - barHeight - 5,
+                "text-anchor": "middle",
+                fill: "#cbd5e1",
+                "font-size": "10"
+            });
+            valueLabel.textContent = String(count);
+            chart.appendChild(valueLabel);
+        }
         const countLabel = createSvgElement("title");
         countLabel.textContent = `${item.hour}: ${count} alerts`;
         bar.appendChild(countLabel);
@@ -938,8 +1004,7 @@ async function updateAlertStatus(alert, newStatus, button) {
             );
         }
 
-        message.textContent = data.message;
-        message.className = "success-message";
+        showStatusMessage(data.message);
 
         // Reload alerts to display the updated status
         await loadAlerts();
@@ -947,8 +1012,7 @@ async function updateAlertStatus(alert, newStatus, button) {
     } catch (error) {
         console.error("Alert update error:", error);
 
-        message.textContent = error.message;
-        message.className = "error-message";
+        showStatusMessage(error.message, true);
     }
 }
 
@@ -982,19 +1046,18 @@ async function runDetection() {
             throw new Error(statusMessage);
         }
 
-        message.textContent =
+        showStatusMessage(
             `Processed ${data.events_processed || 0} events, ` +
             `${data.new_alerts || 0} new alerts, ` +
-            `${data.duplicates_skipped || 0} duplicates skipped`;
-        message.className = "success-message";
+            `${data.duplicates_skipped || 0} duplicates skipped`
+        );
 
         await Promise.all([loadAlerts(), loadSummary()]);
     } catch (error) {
         console.error("Detection run error:", error);
-        message.textContent = error instanceof TypeError
+        showStatusMessage(error instanceof TypeError
             ? "Network error: unable to run detection."
-            : error.message;
-        message.className = "error-message";
+            : error.message, true);
     } finally {
         button.disabled = false;
     }

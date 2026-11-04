@@ -8,6 +8,7 @@
     margin: 0;
     padding: 0;
     box-sizing: border-box;
+    scroll-margin-top: 20px;
 }
 
 body {
@@ -172,7 +173,10 @@ button {
 
 .welcome-section {
     background: linear-gradient(120deg, #172554, #164e63);
-    padding: 30px;
+    align-items: baseline;
+    display: flex;
+    gap: 12px;
+    padding: 14px 24px;
     border-radius: 12px;
     margin-bottom: 30px;
 }
@@ -180,20 +184,25 @@ button {
 .welcome-section h2 {
     color: #ffffff;
     font-size: 22px;
+    margin: 0;
+    white-space: nowrap;
 }
 
 .welcome-section p {
     color: #cbd5e1;
-    margin-top: 12px;
-    line-height: 1.6;
+    margin: 0;
+    line-height: 1.3;
     font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 /* Statistics Cards */
 
 .stats-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 18px;
     margin-bottom: 35px;
 }
@@ -232,6 +241,8 @@ button {
     font-size: 11px;
     margin: -20px 0 25px;
     text-align: right;
+    min-height: 1.2em;
+    padding: 0 2px;
 }
 
 .dashboard-tabs {
@@ -760,11 +771,25 @@ footer {
 
 @media (max-width: 1100px) {
     .stats-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 }
 
 @media (max-width: 700px) {
+    .welcome-section {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .welcome-section p {
+        white-space: normal;
+    }
+
+    .stats-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .dashboard-container {
         flex-direction: column;
     }
@@ -793,10 +818,6 @@ footer {
     .section-heading {
         align-items: flex-start;
         flex-direction: column;
-    }
-
-    .stats-grid {
-        grid-template-columns: 1fr;
     }
 
     .content-section {

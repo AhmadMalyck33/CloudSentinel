@@ -109,6 +109,7 @@ CloudSentinel/
 ├── app/
 │   ├── detection/
 │   │   └── rules.py
+│   ├── worker.py              # standalone detection worker
 │   ├── services/
 │   │   ├── log_collector.py
 │   │   ├── alert_manager.py
@@ -132,6 +133,8 @@ CloudSentinel/
 │   ├── alertmanager/
 │   ├── grafana/
 │   └── docker-exporter/
+│       ├── Dockerfile
+│       └── exporter.py
 │
 ├── tests/
 │   ├── data/
@@ -143,7 +146,8 @@ CloudSentinel/
 ├── docs/
 │   └── evaluation.md
 ├── scripts/
-│   └── evaluate_detection.py
+│   ├── evaluate_detection.py
+│   └── generate_env.py
 │
 ├── .github/
 │   └── workflows/
@@ -180,18 +184,31 @@ cd CloudSentinel
 Build and start the services:
 
 ```bash
-copy .env.example .env
-# Replace every placeholder in .env with a strong local value.
+python scripts/generate_env.py
 docker compose up -d --build
 ```
 
-Compose reads `GRAFANA_ADMIN_PASSWORD`, `CLOUDSENTINEL_API_KEY`, and
-`ALERTMANAGER_WEBHOOK_TOKEN` from `.env`. The `.env` file is ignored and must
-never be committed.
+The generator creates `.env` with cryptographically random values for
+`GRAFANA_ADMIN_PASSWORD`, `CLOUDSENTINEL_API_KEY`, and
+`ALERTMANAGER_WEBHOOK_TOKEN`. It never overwrites an existing `.env`; the file
+is ignored and must never be committed. Do not type production secrets into
+`.env.example`.
 
-The `CLOUDSENTINEL_API_KEY` value is required in the `X-API-Key` header for
-write endpoints such as `/process-events` and alert status updates. GET
-endpoints remain open.
+The API connects to Prometheus through the Compose network using
+`PROMETHEUS_URL=http://prometheus:9090`. When running the API outside Compose,
+set `PROMETHEUS_URL` to the reachable Prometheus URL; an optional example is
+included in `.env.example`.
+
+The generated `CLOUDSENTINEL_API_KEY` value is required in the `X-API-Key`
+header for write endpoints such as `/process-events` and alert status updates.
+In the dashboard, enter this key in the password field in the header area; it
+is kept only in the page's in-memory JavaScript variable. GET endpoints remain
+open. API keys shorter than 16 characters are rejected.
+
+Demo login requests are limited to 20 requests per minute per source address
+by default. Configure this with `CLOUDSENTINEL_LOGIN_RATE_LIMIT`. Event
+storage is capped at 10 MB by default; configure the limit with
+`CLOUDSENTINEL_MAX_EVENT_FILE_MB`.
 
 Check running containers:
 
@@ -213,6 +230,19 @@ docker compose down
 
 To preserve monitoring data, do not remove the named Docker volumes when stopping the project.
 
+### Linux notes
+
+The API and detector containers run as the non-root UID/GID `1000:1000`.
+Before starting Compose on Linux, make the bind-mounted security directory
+writable by that user:
+
+```bash
+sudo chown -R 1000:1000 data/security
+```
+
+Running without root privileges limits the impact of a compromised application
+and avoids creating root-owned alert, event, and database files on the host.
+
 ## 8. Access the Platform
 
 After successful deployment, access the services using:
@@ -223,6 +253,16 @@ After successful deployment, access the services using:
 | Flask API | http://localhost:5000 |
 | Prometheus | http://127.0.0.1:9090 |
 | Grafana | http://localhost:3001 |
+
+Verify that the API can query Prometheus and the exporter metrics with:
+
+```bash
+curl http://localhost:5000/api/status
+curl http://localhost:5000/api/infrastructure
+```
+
+The status response should contain `"exporter": "up"`, and the infrastructure
+response should contain a non-empty `containers` array.
 
 Grafana is provisioned automatically with a Prometheus datasource and the
 CloudSentinel Overview dashboard. Its credentials depend on the configuration
@@ -255,12 +295,24 @@ user. Prometheus metrics use multiprocess mode through
 `PROMETHEUS_MULTIPROC_DIR`; the Compose bind-mounted `data/security`
 directory is used by UID/GID `1000`.
 
+Compose runs detection in the separate `detector` service with the same
+application image and data volume. It processes events every
+`CLOUDSENTINEL_DETECTION_INTERVAL` seconds (default `10`). The API's
+in-process detection thread is disabled in Compose to avoid one detector per
+Gunicorn worker. For local development outside Compose, the original thread
+remains enabled unless `CLOUDSENTINEL_DISABLE_BACKGROUND_DETECTION` is set.
+
 The Docker exporter accesses the Docker Engine through the
 `tecnativa/docker-socket-proxy` service. Only container listing and inspection
 operations are enabled (`CONTAINERS=1`); all POST requests are denied
 (`POST=0`). The proxy has no published port and is attached only to Compose's
 internal `docker-socket` network, while the exporter also joins the monitoring
 network so Prometheus can scrape it.
+
+The exporter image runs as a non-root user. Its polling interval is configured
+with `EXPORTER_INTERVAL_SECONDS` (default `10`), and its log level with
+`LOG_LEVEL` (default `INFO`). Per-container statistics are logged at DEBUG
+level.
 
 To verify the exporter can read stats, start the stack and check its metrics:
 
@@ -360,19 +412,16 @@ curl.exe -X POST http://localhost:5000/demo/login `
 ```
 
 Only `demo` / `demo-pass` succeeds. Other credentials create failed-login
-events. The background detector processes events every 10 seconds. View
-generated alerts at `http://localhost:5000/alerts` or in the dashboard.
+events. The detector service processes events every 10 seconds by default.
+View generated alerts at `http://localhost:5000/alerts` or in the dashboard.
 
-## 12. Limitations
+## 12. Known limitations
 
-- The demo login endpoint is intentionally fixed-credential sample code, not
-  production authentication.
-- SQLite and JSONL storage are suitable for this prototype but not a
-  horizontally scaled production deployment.
-- The Docker socket proxy reduces write access, but Docker Engine access still
-  depends on the host socket and should be isolated carefully.
-- Alert evaluation uses a small synthetic labeled dataset and does not
-  represent production traffic.
+- There is no deployment step yet.
+- The JSONL event source is a demo input, not a production log pipeline.
+- HTTPS is not configured.
+- The API key is shared between users.
+- SQLite is intended for a single-node deployment.
 
 ## 13. CI/CD Pipeline
 
