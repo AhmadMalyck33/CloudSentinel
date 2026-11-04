@@ -38,6 +38,18 @@ from app.metrics import ALERTS
 main = Blueprint("main", __name__)
 
 
+def _validated_prometheus_url() -> str | None:
+    prometheus_url = os.environ.get("PROMETHEUS_URL")
+    if not prometheus_url:
+        return None
+
+    parsed_url = urllib.parse.urlparse(prometheus_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        return None
+
+    return prometheus_url.rstrip("/")
+
+
 # Dashboard frontend route
 @main.route("/dashboard", methods=["GET"])
 def dashboard():
@@ -178,7 +190,7 @@ def _database_status() -> str:
 
 
 def _exporter_status() -> str:
-    prometheus_url = os.environ.get("PROMETHEUS_URL")
+    prometheus_url = _validated_prometheus_url()
     if not prometheus_url:
         return "unknown"
 
@@ -188,7 +200,7 @@ def _exporter_status() -> str:
     url = f"{prometheus_url.rstrip('/')}/api/v1/query?{query}"
 
     try:
-        with urllib.request.urlopen(url, timeout=2) as response:
+        with urllib.request.urlopen(url, timeout=2) as response:  # nosec B310
             payload = json.load(response)
     except (OSError, ValueError, urllib.error.URLError):
         return "unknown"
@@ -401,9 +413,9 @@ INFRASTRUCTURE_QUERIES = (
 
 def _query_prometheus_metric(prometheus_url: str, metric: str) -> list:
     query = urllib.parse.urlencode({"query": metric})
-    url = f"{prometheus_url.rstrip('/')}/api/v1/query?{query}"
+    url = f"{prometheus_url}/api/v1/query?{query}"
 
-    with urllib.request.urlopen(url, timeout=2) as response:
+    with urllib.request.urlopen(url, timeout=2) as response:  # nosec B310
         payload = json.load(response)
 
     if not isinstance(payload, dict) or payload.get("status") != "success":
@@ -419,7 +431,7 @@ def _query_prometheus_metric(prometheus_url: str, metric: str) -> list:
 
 @main.route("/api/infrastructure", methods=["GET"])
 def api_infrastructure():
-    prometheus_url = os.environ.get("PROMETHEUS_URL")
+    prometheus_url = _validated_prometheus_url()
     if not prometheus_url:
         return jsonify({
             "status": "unavailable",
