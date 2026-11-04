@@ -25,10 +25,16 @@ async function loadAlerts() {
             data.total_alerts ?? alerts.length;
 
         // Count high severity alerts
+        // Count high severity alerts requiring attention
         const highAlerts = alerts.filter(
-            alert => alert.severity?.toLowerCase() === "high"
+            alert =>
+                alert.severity?.toLowerCase() === "high" &&
+                ["open", "acknowledged"].includes(
+                    alert.status?.toLowerCase()
+                )
         ).length;
 
+        // Update high severity alert counter
         document.getElementById("high-alerts").textContent =
             highAlerts;
 
