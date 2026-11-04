@@ -1,0 +1,34 @@
+groups:
+  - name: cloudsentinel
+    rules:
+      - alert: CloudSentinelApiDown
+        expr: up{job="cloudsentinel-api"} == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: CloudSentinel API is down
+
+      - alert: DockerExporterDown
+        expr: up{job="docker-exporter"} == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: Docker exporter is down
+
+      - alert: HighContainerCpu
+        expr: cloudsentinel_container_cpu_usage_percent > 80
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Container CPU usage is high
+
+      - alert: HighContainerMemory
+        expr: "cloudsentinel_container_memory_usage_bytes / cloudsentinel_container_memory_limit_bytes > 0.85"
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Container memory usage is high

@@ -6,8 +6,25 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: cloudsentinel-container
+    user: "1000:1000"
+    environment:
+      CLOUDSENTINEL_API_KEY: ${CLOUDSENTINEL_API_KEY:?Set CLOUDSENTINEL_API_KEY in .env}
+      ALERTMANAGER_WEBHOOK_TOKEN: ${ALERTMANAGER_WEBHOOK_TOKEN:?Set ALERTMANAGER_WEBHOOK_TOKEN in .env}
+      CLOUDSENTINEL_FAILED_LOGIN_THRESHOLD: ${CLOUDSENTINEL_FAILED_LOGIN_THRESHOLD:-3}
+      CLOUDSENTINEL_TIME_WINDOW_MINUTES: ${CLOUDSENTINEL_TIME_WINDOW_MINUTES:-5}
+      CLOUDSENTINEL_PORT_SCAN_THRESHOLD: ${CLOUDSENTINEL_PORT_SCAN_THRESHOLD:-5}
     ports:
       - "5000:5000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     volumes:
       - ./data/security:/app/data/security
     restart: unless-stopped
@@ -18,36 +35,124 @@ services:
       context: ./monitoring/docker-exporter
       dockerfile: Dockerfile
     container_name: cloudsentinel-docker-exporter
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+    networks:
+      - default
+      - docker-socket
     expose:
       - "9323"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9323/metrics', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    depends_on:
+      docker-socket-proxy:
+        condition: service_started
+    restart: unless-stopped
+
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.1.2
+    container_name: cloudsentinel-docker-socket-proxy
+    environment:
+      CONTAINERS: "1"
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker-socket
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: cloudsentinel-alertmanager
+    environment:
+      ALERTMANAGER_WEBHOOK_TOKEN: ${ALERTMANAGER_WEBHOOK_TOKEN:?Set ALERTMANAGER_WEBHOOK_TOKEN in .env}
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - >-
+        sed "s|__ALERTMANAGER_WEBHOOK_TOKEN__|$${ALERTMANAGER_WEBHOOK_TOKEN}|g"
+        /etc/alertmanager/alertmanager.yml.template
+        > /tmp/alertmanager.yml &&
+        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml.template:ro
+    expose:
+      - "9093"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --spider
+        - http://127.0.0.1:9093/-/healthy
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     restart: unless-stopped
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.55.1
     container_name: cloudsentinel-prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules.yml:/etc/prometheus/rules.yml:ro
       - prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --spider
+        - http://127.0.0.1:9090/-/healthy
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    depends_on:
+      cloudsentinel-api:
+        condition: service_healthy
+      docker-exporter:
+        condition: service_healthy
+      alertmanager:
+        condition: service_healthy
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.4.0
     container_name: cloudsentinel-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
     ports:
       - "3001:3000"
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   prometheus-data:
   grafana-data:
+
+networks:
+  docker-socket:
+    internal: true

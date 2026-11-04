@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 from app.detection.rules import SecurityDetector
+from app.metrics import DETECTIONS_TOTAL
 from app.services.log_collector import SecurityLogCollector
 from app.services.alert_manager import AlertManager
 
@@ -41,8 +42,7 @@ class DetectionService:
                 alert.get("alert_type"),
                 alert.get("source_ip"),
                 alert.get("destination_ip"),
-                alert.get("failed_attempts"),
-                tuple(alert.get("destination_ports", []))
+                alert.get("window_start")
             )
             for alert in existing_alerts
         }
@@ -54,8 +54,7 @@ class DetectionService:
                 alert.get("alert_type"),
                 alert.get("source_ip"),
                 alert.get("destination_ip"),
-                alert.get("failed_attempts"),
-                tuple(alert.get("destination_ports", []))
+                alert.get("window_start")
             )
 
             if alert_key not in existing_keys:
@@ -63,6 +62,13 @@ class DetectionService:
                 existing_keys.add(alert_key)
 
         saved_count = self.alert_manager.save_alerts(new_alerts)
+        self.alert_manager.record_detection_run()
+
+        if saved_count:
+            for alert in new_alerts:
+                DETECTIONS_TOTAL.labels(
+                    alert_type=alert.get("alert_type", "unknown")
+                ).inc()
 
         return {
             "status": "success",

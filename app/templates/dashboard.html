@@ -10,7 +10,8 @@
           href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 
-<body>
+<body data-prometheus-port="{{ config.PROMETHEUS_PORT }}"
+      data-grafana-port="{{ config.GRAFANA_PORT }}">
 
     <div class="dashboard-container">
 
@@ -23,9 +24,9 @@
             <nav>
                 <a href="/dashboard" class="nav-item active">Dashboard</a>
                 <a href="#security-alerts" class="nav-item">Security Alerts</a>
-                <a href="http://localhost:9090" class="nav-item"
+                <a id="prometheus-link" href="#" class="nav-item"
                    target="_blank">Prometheus</a>
-                <a href="http://localhost:3001" class="nav-item"
+                <a id="grafana-link" href="#" class="nav-item"
                    target="_blank">Grafana</a>
             </nav>
 
@@ -45,7 +46,13 @@
 
                 <div class="system-status">
                     <span class="status-dot"></span>
-                    Systems Operational
+                    <span id="system-status-text">Checking status</span>
+                </div>
+
+                <div class="dashboard-api-key">
+                    <label for="api-key">API key</label>
+                    <input id="api-key" type="password"
+                           autocomplete="off">
                 </div>
             </header>
 
@@ -61,15 +68,27 @@
             <section class="stats-grid">
 
                 <div class="stat-card">
-                    <p>Total Security Alerts</p>
-                    <h2 id="total-alerts">--</h2>
-                    <span>Detected events</span>
+                    <p>Open Alerts</p>
+                    <h2 id="open-alerts">--</h2>
+                    <span>Need attention</span>
                 </div>
 
                 <div class="stat-card">
-                    <p>High Severity Alerts</p>
-                    <h2 id="high-alerts">--</h2>
-                    <span>Require attention</span>
+                    <p>Acknowledged</p>
+                    <h2 id="acknowledged-alerts">--</h2>
+                    <span>Being investigated</span>
+                </div>
+
+                <div class="stat-card">
+                    <p>Resolved</p>
+                    <h2 id="resolved-alerts">--</h2>
+                    <span>Completed alerts</span>
+                </div>
+
+                <div class="stat-card">
+                    <p>Critical/High</p>
+                    <h2 id="critical-high-alerts">--</h2>
+                    <span>Need attention</span>
                 </div>
 
                 <div class="stat-card">
@@ -80,14 +99,61 @@
 
                 <div class="stat-card">
                     <p>Security Engine</p>
-                    <h2 id="security-status">Active</h2>
-                    <span>Detection module</span>
+                    <h2 id="security-status">Checking</h2>
+                    <span id="last-detection">Last detection: Checking</span>
                 </div>
 
             </section>
 
+            <p id="summary-last-updated" class="last-updated">
+                Last updated: --
+            </p>
+
+            <section class="trend-grid" aria-label="Alert trends">
+                <div class="trend-card">
+                    <h2>Alerts per hour</h2>
+                    <div id="alerts-per-hour-chart">
+                        <p class="empty-message">Loading trend data...</p>
+                    </div>
+                </div>
+                <div class="trend-card">
+                    <h2>Top source IPs</h2>
+                    <div id="top-source-ips-chart">
+                        <p class="empty-message">Loading trend data...</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="content-section infrastructure-card"
+                     aria-labelledby="infrastructure-heading">
+                <div class="section-heading">
+                    <div>
+                        <h2 id="infrastructure-heading">Infrastructure</h2>
+                        <p>Current container resource usage.</p>
+                    </div>
+                </div>
+                <div id="infrastructure-content">
+                    <p class="empty-message">Loading infrastructure metrics...</p>
+                </div>
+            </section>
+
+            <div class="dashboard-tabs" role="tablist"
+                 aria-label="Dashboard views">
+                <button id="alerts-tab" class="dashboard-tab active"
+                        type="button" role="tab" aria-selected="true"
+                        aria-controls="alerts-panel" tabindex="0">
+                    Alerts
+                </button>
+                <button id="audit-tab" class="dashboard-tab"
+                        type="button" role="tab" aria-selected="false"
+                        aria-controls="audit-panel" tabindex="-1">
+                    Audit Log
+                </button>
+            </div>
+
             <!-- Security alert management -->
-            <section class="content-section" id="security-alerts">
+            <section class="content-section dashboard-panel" id="alerts-panel"
+                     role="tabpanel" aria-labelledby="alerts-tab">
 
                 <div class="section-heading">
                     <div>
@@ -95,10 +161,48 @@
                         <p>Review, acknowledge and resolve security alerts.</p>
                     </div>
 
-                    <button onclick="loadAlerts()">Refresh Alerts</button>
+                    <div>
+                        <button id="run-detection" type="button">
+                            Run Detection Now
+                        </button>
+                        <button id="refresh-alerts" type="button">
+                            Refresh Alerts
+                        </button>
+                    </div>
                 </div>
 
                 <div class="table-container">
+                    <div class="alert-filters">
+                        <label for="status-filter">Status</label>
+                        <select id="status-filter">
+                            <option value="all">All</option>
+                            <option value="open">Open</option>
+                            <option value="acknowledged">Acknowledged</option>
+                            <option value="resolved">Resolved</option>
+                        </select>
+
+                        <label for="severity-filter">Severity</label>
+                        <select id="severity-filter">
+                            <option value="all">All</option>
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                            <option value="critical">Critical</option>
+                        </select>
+
+                        <label for="type-filter">Alert type</label>
+                        <select id="type-filter">
+                            <option value="all">All</option>
+                        </select>
+
+                        <label for="source-search">Source IP</label>
+                        <input id="source-search" type="search"
+                               placeholder="Search source IP">
+                        <button id="clear-filters" type="button">
+                            Clear filters
+                        </button>
+                    </div>
+
                     <table>
                         <thead>
                             <tr>
@@ -117,10 +221,56 @@
                             </tr>
                         </tbody>
                     </table>
+
+                    <div class="pagination" aria-label="Alert pagination">
+                        <button id="previous-page" type="button">
+                            Previous
+                        </button>
+                        <span id="page-indicator">Page 1 of 1</span>
+                        <button id="next-page" type="button">Next</button>
+                    </div>
                 </div>
 
                 <p id="alert-message" role="status" aria-live="polite"></p>
 
+            </section>
+
+            <section class="content-section dashboard-panel" id="audit-panel"
+                     role="tabpanel" aria-labelledby="audit-tab" hidden>
+                <div class="section-heading">
+                    <div>
+                        <h2>Audit Log</h2>
+                        <p>Review alert status changes and their reasons.</p>
+                    </div>
+                </div>
+
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Alert ID</th>
+                                <th>Actor</th>
+                                <th>Old Status</th>
+                                <th>New Status</th>
+                                <th>Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody id="audit-table">
+                            <tr>
+                                <td colspan="6">Loading audit records...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <div class="pagination" aria-label="Audit pagination">
+                        <button id="audit-previous-page" type="button">
+                            Previous
+                        </button>
+                        <span id="audit-page-indicator">Page 1 of 1</span>
+                        <button id="audit-next-page" type="button">Next</button>
+                    </div>
+                </div>
             </section>
 
             <footer>
@@ -130,6 +280,28 @@
         </main>
 
     </div>
+
+    <dialog id="status-dialog" aria-labelledby="status-dialog-title">
+        <form id="status-form" method="dialog">
+            <h2 id="status-dialog-title">Update alert status</h2>
+            <p id="status-dialog-alert"></p>
+
+            <label for="status-actor">Your name</label>
+            <input id="status-actor" type="text" maxlength="50"
+                   autocomplete="name" required>
+
+            <label for="status-reason">Reason</label>
+            <textarea id="status-reason" maxlength="200"
+                      rows="4"></textarea>
+            <span id="status-reason-count">0/200</span>
+            <p id="status-dialog-error" role="alert"></p>
+
+            <div class="dialog-actions">
+                <button id="status-cancel" type="button">Cancel</button>
+                <button id="status-confirm" type="submit">Confirm</button>
+            </div>
+        </form>
+    </dialog>
 
     <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 

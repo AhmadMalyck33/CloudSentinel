@@ -15,6 +15,7 @@ __pycache__/
 # Environment variables and secrets
 .env
 .env.*
+!.env.example
 
 # IDE settings
 .vscode/
@@ -32,3 +33,6 @@ Thumbs.db
 # Backup files
 *.backup
 *.bak
+
+# Runtime security data
+data/security/*
